@@ -1,0 +1,9 @@
+# Optional Heavy Local ML Stack (Install inside .venv when GPU/CPU weights are desired)
+# .\venv\Scripts\pip install -r server/requirements-ml.txt
+faster-whisper>=1.1.0
+ctranslate2>=4.5.0
+onnxruntime>=1.20.0
+chromadb>=0.5.18
+kokoro-onnx>=0.3.0
+soundfile>=0.12.1
+
