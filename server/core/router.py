@@ -916,5 +916,14 @@ class HybridCognitiveRouter:
             "router_metrics": self.rate_limiter.snapshot(),
         }
 
+    async def shutdown(self) -> None:
+        """Close shared HTTP client connections and free resources."""
+        if self._http_client is not None and not self._http_client.is_closed:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
+
 
 cognitive_router = HybridCognitiveRouter()

@@ -17,12 +17,15 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 from collections import deque
 import io
 import math
 import os
 import re
+import shutil
+import signal
 import sys
 import time
 import wave
@@ -373,6 +376,12 @@ class JarvisStandaloneVoiceCLI:
             )
         )
 
+    def _clear_status_line(self) -> None:
+        """Clears the live status line cleanly without wrapping past terminal margins."""
+        cols = max(40, shutil.get_terminal_size((80, 24)).columns - 1)
+        sys.stdout.write("\r" + " " * cols + "\r")
+        sys.stdout.flush()
+
     def render_turn(
         self,
         role: str,
@@ -382,9 +391,8 @@ class JarvisStandaloneVoiceCLI:
         tools: Optional[List[str]] = None,
     ) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
+        self._clear_status_line()
         if role == "user":
-            sys.stdout.write("\r" + " " * 110 + "\r")
-            sys.stdout.flush()
             console.print(
                 Panel(
                     f"[bold white]{text}[/bold white]",
@@ -396,8 +404,6 @@ class JarvisStandaloneVoiceCLI:
                 )
             )
         else:
-            sys.stdout.write("\r" + " " * 110 + "\r")
-            sys.stdout.flush()
             meta = f"[cyan]{tier}[/cyan] | [bright_cyan]{latency_ms:.0f}ms[/bright_cyan] | [dim]{ts}[/dim]"
             body = f"[bold bright_cyan]{text}[/bold bright_cyan]"
             if tools:
@@ -416,27 +422,38 @@ class JarvisStandaloneVoiceCLI:
             )
 
     def render_live_status_line(self) -> None:
-        """Draws the single-line bottom live VU meter without scrolling the terminal."""
-        bars_total = 18
+        """Draws the single-line bottom live VU meter without scrolling or wrapping the terminal."""
+        cols = shutil.get_terminal_size((80, 24)).columns
+        max_len = max(35, cols - 1)
+
+        bars_total = 12
         # Non-linear perceptual VU scaling so quiet Windows mic arrays visibly animate the meter
         level = min(1.0, math.sqrt(max(0.0, self.current_rms / 0.015)))
         filled = int(round(level * bars_total))
         vu_bar = "#" * filled + "-" * (bars_total - filled)
 
         if self.is_speaking:
-            state = "SPEAKING [ECHO GUARD] (Press SPACE to Barge-In)"
+            state = "SPEAKING [SPACE: Barge-In]"
         elif self.is_thinking:
             state = "ROUTING COGNITIVE RESPONSE..."
         elif not self.mic_active:
-            state = "MIC MUTED (Press [M] to unmute or [T] to type)"
+            state = "MIC MUTED ([M] unmute, [T] type)"
         elif self.is_recording_utterance:
             state = "CAPTURING VOICE DIRECTIVE..."
         else:
-            state = "LISTENING (Speak now or press [T] to type)"
+            state = "LISTENING ([T] to type)"
 
         router_str = cognitive_router.preferred_mode.upper()
-        line = f"\r  [{router_str}] {state:<48}  MIC [{vu_bar}] "
-        sys.stdout.write(line[:115])
+        prefix = f" [{router_str}] {state}"
+        suffix = f" MIC [{vu_bar}]"
+
+        avail = max_len - len(prefix) - len(suffix)
+        if avail > 0:
+            status_text = prefix + (" " * avail) + suffix
+        else:
+            status_text = (prefix + suffix)[:max_len]
+
+        sys.stdout.write(f"\r{status_text}")
         sys.stdout.flush()
 
     # ------------------------------------------------------------------
@@ -557,7 +574,7 @@ class JarvisStandaloneVoiceCLI:
                     key = ch.lower()
 
                     if key == "q":
-                        sys.stdout.write("\r" + " " * 110 + "\r")
+                        self._clear_status_line()
                         console.print("[bold cyan]Powering down J.A.R.V.I.S. Voice Core. Goodbye, Sir.[/bold cyan]")
                         break
 
@@ -596,8 +613,7 @@ class JarvisStandaloneVoiceCLI:
                         # Pause mic while typing text directive
                         prev_mic = self.mic_active
                         self.mic_active = False
-                        sys.stdout.write("\r" + " " * 110 + "\r")
-                        sys.stdout.flush()
+                        self._clear_status_line()
                         try:
                             typed = await asyncio.to_thread(
                                 console.input,
@@ -611,16 +627,86 @@ class JarvisStandaloneVoiceCLI:
 
                 await asyncio.sleep(0.05)
         finally:
-            if self._stream is not None:
-                try:
-                    self._stream.stop()
-                    self._stream.close()
-                except Exception:
-                    pass
+            await self.cleanup()
+
+    async def cleanup(self) -> None:
+        """Gracefully release audio streams, background models, and port connections."""
+        self.running = False
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        voice_engine.shutdown()
+        await cognitive_router.shutdown()
+
+
+_active_cli: Optional[JarvisStandaloneVoiceCLI] = None
+
+
+def _emergency_cleanup() -> None:
+    global _active_cli
+    if _active_cli is not None:
+        _active_cli.running = False
+        if _active_cli._stream is not None:
+            try:
+                _active_cli._stream.stop()
+                _active_cli._stream.close()
+            except Exception:
+                pass
+            _active_cli._stream = None
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        voice_engine.shutdown()
+
+
+atexit.register(_emergency_cleanup)
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+    def _win_ctrl_handler(dwCtrlType: int) -> bool:
+        _emergency_cleanup()
+        return False
+
+    _ctrl_handler = PHANDLER_ROUTINE(_win_ctrl_handler)
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler, True)
+
+
+def _sig_handler(signum: int, frame: Any) -> None:
+    _emergency_cleanup()
+    sys.exit(0)
+
+
+try:
+    signal.signal(signal.SIGTERM, _sig_handler)
+except Exception:
+    pass
+
+if hasattr(signal, "SIGBREAK"):
+    try:
+        signal.signal(signal.SIGBREAK, _sig_handler)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
+    cli = JarvisStandaloneVoiceCLI()
+    _active_cli = cli
     try:
-        asyncio.run(JarvisStandaloneVoiceCLI().run())
+        asyncio.run(cli.run())
     except KeyboardInterrupt:
         print("\n[*] J.A.R.V.I.S. CLI terminated.")
+    finally:
+        _emergency_cleanup()

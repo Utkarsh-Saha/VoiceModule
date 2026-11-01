@@ -9,6 +9,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 from typing import Any, Dict, List, Optional
 
@@ -24,10 +25,21 @@ from server.core.voice_engine import voice_engine
 from server.mcp_tools import execute_mcp_tool, get_mcp_registry_state
 from server.mcp_tools.system_telemetry import get_system_telemetry
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Graceful startup and shutdown lifecycle for background AI threads & ports."""
+    yield
+    # Cleanup on server shutdown
+    voice_engine.shutdown()
+    await cognitive_router.shutdown()
+
+
 app = FastAPI(
     title="PROJECT J.A.R.V.I.S. — Cognitive Core & Full-Duplex Spine",
     version="2.0.0",
     description="Hybrid Cloud-Local Cognitive Core, Full-Duplex Voice Engine, Cortex Memory Core Graph, and MCP Host Bus.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

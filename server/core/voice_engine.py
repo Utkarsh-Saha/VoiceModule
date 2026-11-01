@@ -382,5 +382,16 @@ class FullDuplexVoiceEngine:
             "timestamp": time.time(),
         }
 
+    def shutdown(self) -> None:
+        """Gracefully release thread pools, COM handles, and cached models."""
+        self.is_jarvis_speaking = False
+        try:
+            self._sapi_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        self._sapi_voice = None
+        self._sapi_fmt = None
+        self._whisper_model = None
+
 
 voice_engine = FullDuplexVoiceEngine()
